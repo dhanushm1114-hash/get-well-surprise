@@ -1,9 +1,52 @@
 
 import './style.css';
 import gsap from 'gsap';
-
+import { supabase } from './supabase.js';
 const app = document.querySelector('#app');
+// Upload selected photos and save the surprise in Supabase
+async function saveSurpriseToCloud() {
+  const friend = sessionStorage.getItem('friendName');
+  const sender = sessionStorage.getItem('senderName');
+  const letter = sessionStorage.getItem('personalLetter');
+  const pin = sessionStorage.getItem('letterPin');
+  const photos = window.memoryPhotos || [];
+  const wishes = window.surpriseWishes || [];
 
+  const photoUrls = [];
+
+  for (const photo of photos) {
+    const extension = photo.type.split('/')[1] || 'jpg';
+    const filePath = `${crypto.randomUUID()}.${extension}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('surprise-photos')
+      .upload(filePath, photo, {
+        contentType: photo.type,
+        upsert: false
+      });
+
+    if (uploadError) throw uploadError;
+
+    const { data } = supabase.storage
+      .from('surprise-photos')
+      .getPublicUrl(filePath);
+
+    photoUrls.push(data.publicUrl);
+  }
+
+  const { data, error } = await supabase.rpc('create_surprise', {
+    p_friend_name: friend,
+    p_sender_name: sender,
+    p_wishes: wishes,
+    p_photo_urls: photoUrls,
+    p_letter: letter,
+    p_pin: pin
+  });
+
+  if (error) throw error;
+
+  return `${window.location.origin}/?surprise=${data}`;
+}
 // ==========================================
 // 1. WELCOME SCREEN
 // ==========================================
@@ -190,7 +233,7 @@ function showBalloonScreen() {
     "Wishing you brighter days ahead! ☀️",
     "Can't wait to see you smile again! 💗"
   ];
-
+window.surpriseWishes = wishes;
   let popped = 0;
 
   app.innerHTML = `
@@ -504,17 +547,30 @@ function showPinSetupScreen() {
     duration: 0.8
   });
 
-  document.querySelector('#lockLetter').addEventListener('click', () => {
-    const pin = document.querySelector('#createPin').value;
+document.querySelector('#lockLetter').addEventListener('click', async () => {
+  const pin = document.querySelector('#createPin').value;
+  const button = document.querySelector('#lockLetter');
 
-    if (!/^\d{4}$/.test(pin)) {
-      alert('Please enter exactly 4 digits!');
-      return;
-    }
+  if (!/^\d{4}$/.test(pin)) {
+    alert('Please enter exactly 4 digits!');
+    return;
+  }
 
-    sessionStorage.setItem('letterPin', pin);
-    showFinalScreen();
-  });
+  sessionStorage.setItem('letterPin', pin);
+
+  button.disabled = true;
+  button.textContent = 'Creating your share link...';
+
+  try {
+    const shareUrl = await saveSurpriseToCloud();
+    showShareScreen(shareUrl);
+  } catch (error) {
+    console.error(error);
+    alert('Could not create your share link: ' + error.message);
+    button.disabled = false;
+    button.textContent = 'Lock My Letter';
+  }
+});
 }
 
 // ==========================================
@@ -779,4 +835,543 @@ function showCelebrationScreen() {
       musicButton.textContent = '♫ Play Music';
     }
   });
+}
+
+// ==========================================
+// 9. SHARE LINK SCREEN
+// ==========================================
+
+function showShareScreen(shareUrl) {
+  app.innerHTML = `
+    <main class="details-page">
+      <section class="details-card">
+        <div class="details-icon">💗</div>
+
+        <p class="small-heading">YOUR SURPRISE IS READY</p>
+
+        <h1>Made with Love! 💕</h1>
+
+        <p class="description">
+          Your surprise has been saved successfully.
+          Send this link to your friend!
+        </p>
+
+        <input
+          type="text"
+          id="shareLink"
+          readonly
+          value="${escapeHTML(shareUrl)}"
+          style="width:100%;padding:14px;
+          border:1px solid #efd5de;border-radius:12px;
+          margin:20px 0;text-align:center;"
+        />
+
+        <button class="start-button" id="copyShareLink">
+          Copy Share Link 📋
+        </button>
+
+        <p id="copyMessage" style="margin-top:15px;color:#bd7790;"></p>
+
+        <a href="${escapeHTML(shareUrl)}" target="_blank"
+          rel="noopener noreferrer">
+          Preview Your Surprise 💕
+        </a>
+      </section>
+    </main>
+  `;
+
+  document.querySelector('#copyShareLink').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      document.querySelector('#copyMessage').textContent =
+        'Link copied successfully! 💗';
+    } catch (error) {
+      const input = document.querySelector('#shareLink');
+      input.select();
+      document.execCommand('copy');
+
+      document.querySelector('#copyMessage').textContent =
+        'Link copied! 💗';
+    }
+  });
+}
+
+// ==========================================
+// 10. FRIEND-SIDE SHARED SURPRISE
+// ==========================================
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[char]);
+}
+
+async function loadSharedSurprise(shareId) {
+  app.innerHTML = `
+    <main class="details-page">
+      <section class="details-card">
+        <div class="details-icon">💗</div>
+        <h1>Loading your surprise...</h1>
+        <p class="description">A little love is on its way!</p>
+      </section>
+    </main>
+  `;
+
+  try {
+    const { data, error } = await supabase.rpc('get_surprise', {
+      p_share_id: shareId
+    });
+
+    if (error) throw error;
+    if (!data) throw new Error('Surprise not found');
+
+    showSharedBalloonScreen(data, shareId);
+
+  } catch (error) {
+    console.error('Could not load shared surprise:', error);
+
+    app.innerHTML = `
+      <main class="details-page">
+        <section class="details-card">
+          <div class="details-icon">💔</div>
+          <h1>Surprise not found</h1>
+          <p class="description">
+            This link may be invalid. Please ask your friend to share it again.
+          </p>
+        </section>
+      </main>
+    `;
+  }
+}
+
+// ==========================================
+// 11. FRIEND BALLOON WISHES
+// ==========================================
+
+function showSharedBalloonScreen(data, shareId) {
+  const wishes = Array.isArray(data.wishes) ? data.wishes : [];
+  const friend = escapeHTML(data.friend_name);
+  const sender = escapeHTML(data.sender_name);
+
+  let popped = 0;
+
+  app.innerHTML = `
+    <main class="balloon-page">
+      <p class="small-heading">A LITTLE LOVE FOR YOU</p>
+
+      <h1>Hey ${friend}! 💗</h1>
+
+      <p class="description">
+        ${sender} has hidden ${wishes.length} little wishes for you.
+        Pop every balloon!
+      </p>
+
+      <p class="progress-text">
+        Wishes discovered: <span id="sharedProgress">0</span>/${wishes.length}
+      </p>
+
+      <div class="balloon-container">
+        ${wishes.map((wish, i) => `
+          <button class="balloon balloon-${(i % 5) + 1}"
+            data-index="${i}">
+            <span class="balloon-emoji">🎈</span>
+          </button>
+        `).join('')}
+      </div>
+
+      <div id="sharedWishMessage" class="wish-message">
+        Tap a balloon to reveal your wish 💌
+      </div>
+
+      <div id="sharedFinish" hidden>
+        <h2>You found all the wishes! 💕</h2>
+        <p>Remember, you are loved more than you know.</p>
+
+        <button class="start-button" id="sharedMemoriesButton">
+          See Our Memories ♡
+        </button>
+      </div>
+    </main>
+  `;
+
+  gsap.from('.balloon-page', {
+    opacity: 0,
+    y: 30,
+    duration: 0.8
+  });
+
+  if (wishes.length > 0) {
+    gsap.to('.balloon', {
+      y: -15,
+      duration: 1.2,
+      repeat: -1,
+      yoyo: true,
+      stagger: 0.2,
+      ease: 'sine.inOut'
+    });
+  } else {
+    document.querySelector('#sharedFinish').hidden = false;
+  }
+
+  document.querySelectorAll('.balloon').forEach(button => {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+
+      button.disabled = true;
+      popped++;
+
+      const index = Number(button.dataset.index);
+
+      document.querySelector('#sharedProgress').textContent = popped;
+      document.querySelector('#sharedWishMessage').textContent =
+        String(wishes[index] ?? '');
+
+      gsap.to(button, {
+        scale: 1.8,
+        opacity: 0,
+        duration: 0.35,
+        onComplete: () => button.remove()
+      });
+
+      if (popped === wishes.length) {
+        setTimeout(() => {
+          const finish = document.querySelector('#sharedFinish');
+          finish.hidden = false;
+
+          gsap.from(finish, {
+            opacity: 0,
+            y: 25,
+            duration: 0.8
+          });
+        }, 500);
+      }
+    });
+  });
+
+  document.querySelector('#sharedMemoriesButton')
+    .addEventListener('click', () => {
+      showSharedMemoriesScreen(data, shareId);
+    });
+}
+
+// ==========================================
+// 12. FRIEND MEMORIES
+// ==========================================
+
+function showSharedMemoriesScreen(data, shareId) {
+  const photos = Array.isArray(data.photo_urls) ? data.photo_urls : [];
+  const friend = escapeHTML(data.friend_name);
+  const sender = escapeHTML(data.sender_name);
+
+  app.innerHTML = `
+    <main class="memories-page">
+      <section class="memories-card">
+        <div class="details-icon">📸</div>
+
+        <p class="small-heading">LITTLE MOMENTS, BIG MEMORIES</p>
+
+        <h1>Our Memories 💗</h1>
+
+        <p class="description">
+          ${friend}, here are some memories shared with love by ${sender}.
+        </p>
+
+        <div class="final-photo-gallery">
+          ${photos.length
+            ? photos.map((url, i) => `
+                <img src="${escapeHTML(url)}" alt="Memory ${i + 1}">
+              `).join('')
+            : '<p>No photos were added to this surprise 💗</p>'
+          }
+        </div>
+
+        <button class="start-button" id="sharedLetterButton">
+          Continue to Your Letter ♡
+        </button>
+
+        <p class="footer-note">Made with love by ${sender} 💕</p>
+      </section>
+    </main>
+  `;
+
+  gsap.from('.memories-card', {
+    opacity: 0,
+    y: 30,
+    duration: 0.8
+  });
+
+  document.querySelector('#sharedLetterButton')
+    .addEventListener('click', () => {
+      showSharedPinScreen(data, shareId);
+    });
+}
+
+// ==========================================
+// 13. FRIEND PIN AND LETTER
+// ==========================================
+
+function showSharedPinScreen(data, shareId) {
+  const friend = escapeHTML(data.friend_name);
+  const sender = escapeHTML(data.sender_name);
+
+  app.innerHTML = `
+    <main class="details-page">
+      <section class="details-card">
+        <div class="details-icon">🔐</div>
+
+        <p class="small-heading">ONE LAST SURPRISE</p>
+
+        <h1>Something Special<br>For ${friend}</h1>
+
+        <p class="description">
+          ${sender} has written you a little letter.
+          Enter the secret 4-digit PIN to unlock it.
+        </p>
+
+        <div id="sharedEnvelope" style="font-size:90px;margin:25px 0;">
+          💌
+        </div>
+
+        <input
+          id="sharedPin"
+          type="password"
+          inputmode="numeric"
+          maxlength="4"
+          placeholder="Enter 4-digit PIN"
+          style="width:100%;padding:16px;
+          border:1px solid #efd5de;border-radius:12px;
+          text-align:center;font-size:22px;letter-spacing:8px;"
+        />
+
+        <button class="start-button" id="sharedUnlockButton"
+          style="margin-top:20px;">
+          Open My Letter ♡
+        </button>
+
+        <p id="sharedPinError" style="color:#d16d82;margin-top:15px;"></p>
+
+        <div id="sharedLetterContent" hidden>
+          <h2 style="color:#bd7790;margin:20px 0;">
+            A Letter For You 💗
+          </h2>
+
+          <p id="sharedLetterText"
+            style="white-space:pre-wrap;line-height:1.9;
+            color:#86636e;text-align:left;"></p>
+
+          <p style="margin-top:25px;color:#bd7790;">
+            With lots of love,<br>${sender} ❤️
+          </p>
+
+          <button class="start-button" id="sharedFinalButton"
+            style="margin-top:25px;">
+            Open Your Final Surprise 🌸
+          </button>
+        </div>
+      </section>
+    </main>
+  `;
+
+  document.querySelector('#sharedUnlockButton')
+    .addEventListener('click', async () => {
+      const pin = document.querySelector('#sharedPin').value;
+      const button = document.querySelector('#sharedUnlockButton');
+      const errorText = document.querySelector('#sharedPinError');
+
+      if (!/^\d{4}$/.test(pin)) {
+        errorText.textContent = 'Please enter a 4-digit PIN.';
+        return;
+      }
+
+      button.disabled = true;
+      button.textContent = 'Checking PIN...';
+      errorText.textContent = '';
+
+      try {
+        const { data: letter, error } = await supabase.rpc(
+          'unlock_letter',
+          {
+            p_share_id: shareId,
+            p_pin: pin
+          }
+        );
+
+        if (error) throw error;
+
+        document.querySelector('#sharedEnvelope').textContent = '💖';
+        document.querySelector('#sharedLetterText').textContent = letter;
+        document.querySelector('#sharedLetterContent').hidden = false;
+
+        document.querySelector('#sharedPin').hidden = true;
+        button.hidden = true;
+
+        gsap.from('#sharedLetterContent', {
+          opacity: 0,
+          y: 25,
+          duration: 0.8
+        });
+
+        document.querySelector('#sharedFinalButton')
+          .addEventListener('click', () => {
+            showSharedCelebrationScreen(data);
+          });
+
+      } catch (error) {
+        console.error('PIN verification failed:', error);
+        errorText.textContent = 'Incorrect PIN. Try again 💗';
+        button.disabled = false;
+        button.textContent = 'Open My Letter ♡';
+      }
+    });
+}
+
+// ==========================================
+// 14. FRIEND FINAL CELEBRATION
+// ==========================================
+
+function showSharedCelebrationScreen(data) {
+  const photos = Array.isArray(data.photo_urls) ? data.photo_urls : [];
+  const friend = escapeHTML(data.friend_name);
+  const sender = escapeHTML(data.sender_name);
+
+  app.innerHTML = `
+    <div id="celebrationHearts"></div>
+
+    <main class="celebration-page">
+      <div class="celebration-content">
+        <div class="celebration-flower">🌷</div>
+
+        <p class="small-heading">A SPECIAL MESSAGE JUST FOR YOU</p>
+
+        <h1>
+          Get Well Soon,<br>
+          <span>${friend}!</span> 💗
+        </h1>
+
+        <div class="big-heart">💖</div>
+
+        <p class="celebration-message">
+          I wish I could take away all your pain
+          and replace it with happiness.
+          Until then, sending you endless hugs,
+          love and positive energy.
+        </p>
+
+        <h2 class="healing-heading">Better Days Are Coming ☀️</h2>
+
+        <p class="sender-message">
+          Take care, rest well and keep smiling.
+          The world needs your beautiful smile!
+        </p>
+
+        <p class="signature">
+          With lots of love,<br>${sender} ❤️
+        </p>
+
+        ${photos.length ? `
+          <section class="final-memories">
+            <h2>Our Little Memories 📸</h2>
+            <div class="final-photo-gallery">
+              ${photos.map((url, i) => `
+                <img src="${escapeHTML(url)}" alt="Memory ${i + 1}">
+              `).join('')}
+            </div>
+          </section>
+        ` : ''}
+
+        <div class="music-area">
+          <button id="musicButton" class="music-button">
+            ♫ Play Music
+          </button>
+
+          <audio id="backgroundMusic" loop preload="auto">
+            <source src="/music/soft-music.mp3" type="audio/mpeg">
+          </audio>
+        </div>
+
+        <p class="final-footer">
+          Made with endless love, just for you ✨
+        </p>
+      </div>
+    </main>
+  `;
+
+  const heartContainer = document.querySelector('#celebrationHearts');
+
+  for (let i = 0; i < 35; i++) {
+    const heart = document.createElement('span');
+    heart.className = 'celebration-heart';
+    heart.textContent = ['💗', '🌸', '♡', '✨'][i % 4];
+    heart.style.left = Math.random() * 100 + '%';
+    heart.style.animationDuration = (6 + Math.random() * 8) + 's';
+    heart.style.animationDelay = Math.random() * 6 + 's';
+    heartContainer.appendChild(heart);
+  }
+
+  gsap.from('.celebration-content', {
+    opacity: 0,
+    y: 50,
+    scale: 0.95,
+    duration: 1.3,
+    ease: 'power3.out'
+  });
+
+  gsap.to('.big-heart', {
+    scale: 1.18,
+    duration: 0.8,
+    repeat: -1,
+    yoyo: true,
+    ease: 'sine.inOut'
+  });
+
+
+  const music = document.querySelector('#backgroundMusic');
+  const musicButton = document.querySelector('#musicButton');
+
+  async function startMusic() {
+    try {
+      await music.play();
+      musicButton.textContent = 'Ⅱ Pause Music';
+    } catch (error) {
+      musicButton.textContent = '♫ Tap to Play Music';
+    }
+  }
+
+  musicButton.addEventListener('click', async () => {
+    if (music.paused) {
+      await startMusic();
+    } else {
+      music.pause();
+      musicButton.textContent = '♫ Play Music';
+    }
+  });
+
+  // Try autoplay when the celebration screen opens.
+  startMusic();
+
+  // If autoplay is blocked, start music on the first user interaction.
+  const startOnInteraction = () => {
+    if (music.paused) startMusic();
+    document.removeEventListener('click', startOnInteraction);
+    document.removeEventListener('touchstart', startOnInteraction);
+  };
+
+  document.addEventListener('click', startOnInteraction);
+  document.addEventListener('touchstart', startOnInteraction);
+
+}
+
+// ==========================================
+// 15. CHECK FOR FRIEND'S SHARED LINK
+// ==========================================
+
+const sharedSurpriseId =
+  new URLSearchParams(window.location.search).get('surprise');
+
+if (sharedSurpriseId) {
+  loadSharedSurprise(sharedSurpriseId);
 }
